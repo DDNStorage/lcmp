@@ -1,0 +1,78 @@
+# LCRP specfile
+
+Name: @PACKAGE@
+Version: @VERSION@
+
+Vendor: DataDirect Networks Inc.
+Prefix: %{_prefix}
+
+Release: @LCRP_RELEASE@%{?dist}
+
+Summary: lcrp - Lustre Cache Replacement Policy
+License: All rights reserved DataDirect Networks Inc.
+Group: Applications/System
+Source0: @PACKAGE@-%{version}.tar.gz
+BuildRoot: %{_tmppath}/%{name}-%{version}-%{release}-root-%(%{__id_u} -n)
+Requires: lustre
+Provides: lcrp = %{version}-%{release}
+Requires(post): systemd
+Requires(preun): systemd
+Requires(postun): systemd
+BuildRequires: systemd
+
+%description
+LCRP(Lustre Cache Replacement Policy) is a policy that replace the cache.
+
+Generated using options: @ac_configure_args@
+
+%prep
+%setup -q -n @PACKAGE@-%{version}
+
+%post
+%systemd_post lcrp.service
+
+%preun
+%systemd_preun lcrp.service
+
+%postun
+%systemd_postun_with_restart lcrp.service
+
+%build
+./configure @ac_configure_args@ %{?configure_flags:configure_flags} \
+	--sysconfdir=%{_sysconfdir} \
+	--mandir=%{_mandir} \
+	--libdir=%{_libdir} \
+	--includedir=%{_includedir} \
+	--prefix=%{_prefix}
+
+make
+make check
+
+%install
+rm -rf $RPM_BUILD_ROOT
+make install DESTDIR=$RPM_BUILD_ROOT
+mkdir -p $RPM_BUILD_ROOT%{_bindir}
+mkdir -p $RPM_BUILD_ROOT%{_libdir}
+mkdir -p $RPM_BUILD_ROOT%{python_sitelib}
+mkdir -p $RPM_BUILD_ROOT%{_mandir}/man1
+mkdir -p $RPM_BUILD_ROOT%{_mandir}/man5
+mkdir -p $RPM_BUILD_ROOT%{_sysconfdir}/yum.repos.d
+cp src/lcrp $RPM_BUILD_ROOT%{_bindir}
+
+mkdir -p $RPM_BUILD_ROOT/usr/lib/systemd/system/
+install -m 0644 -D systemd/lcrp.service $RPM_BUILD_ROOT%{_unitdir}/lcrp.service
+install -g 0 -o 0 -m 0644 man/lcrp.1 $RPM_BUILD_ROOT%{_mandir}/man1/
+
+
+%clean
+rm -rf $RPM_BUILD_ROOT
+
+%files
+%defattr(-,root,root)
+%{_bindir}/lcrp
+%{_unitdir}/lcrp.service
+
+
+%changelog
+* Wed May 23 2019 Li Xi <lixi@ddn.com> 0.1
+- Initial import
