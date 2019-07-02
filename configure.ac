@@ -107,88 +107,6 @@ if test "x$idle_user_header" = "xyes"; then
         AC_DEFINE(IDLE_USER_HEADER, 1, [Lustre uses idle user header])
 fi
 
-# -------- check whether DoM is supported by Lustre head files --------
-AC_MSG_CHECKING([Lustre has PFL support])
-saved_libs=$LIBS
-LIBS="-llustreapi"
-AC_LINK_IFELSE([AC_LANG_SOURCE([	
-	#include <lustre/lustre_user.h>
-
-	int main(void) {
-		int a = LOV_USER_MAGIC_COMP_V1;
-	}
-])],[
-AC_DEFINE([HAVE_LUSTRE_PFL], 1,
-	  [Lustre has PFL support])
-have_lustre_pfl=yes
-], [have_lustre_pfl="no"])
-LIBS=$saved_libs
-AC_MSG_RESULT([$have_lustre_pfl])
-
-# -------- check for llapi_layout_get_by_xattr() --------
-AC_MSG_CHECKING([Lustre have llapi_layout_get_by_xattr() and LSoM])
-saved_libs=$LIBS
-LIBS="-llustreapi"
-AC_LINK_IFELSE([AC_LANG_SOURCE([	
-	#include <lustre/lustreapi.h>
-
-	int main(void) {
-		llapi_layout_get_by_xattr(NULL, 0, 0);
-	}
-])],[
-AC_DEFINE([HAVE_LAYOUT_BY_XATTR], 1,
-	  [have llapi_layout_get_by_xattr()])
-AC_DEFINE([HAVE_LAZY_SIZE_ON_MDT], 1,
-	  [have lazy size on MDT])
-have_layout_by_xattr=yes
-], [have_layout_by_xattr="no"])
-LIBS=$saved_libs
-AC_MSG_RESULT([$have_layout_by_xattr])
-
-# -------- check for build laudit --------
-BUILD_LAUDIT="yes"
-NIDSTR=""
-AC_CHECK_HEADER([lnet/nidstr.h], NIDSTR="lnet", [], [
-AC_INCLUDES_DEFAULT
-#include <stdbool.h>
-])
-AS_IF([test "x$NIDSTR" = "xlnet" ],
-      [AC_DEFINE([HAVE_LNET_NIDSTR], [1], [lnet/nidstr.h exists]) lustre_user_dir="lustre"],
-      [AC_CHECK_HEADER([linux/lnet/nidstr.h], NIDSTR="linux", [], [
-AC_INCLUDES_DEFAULT
-#include <stdbool.h>
-])])
-AS_IF([test "x$NIDSTR" = "xlinux" ],
-      [AC_DEFINE([HAVE_LINUX_NIDSTR], [1], [linux/lnet/nidstr.h exists])] lustre_user_dir="linux/lustre")
-if test "x$NIDSTR" = "x"; then
-	AC_MSG_WARN([])
-	AC_MSG_WARN([nidstr include is needed for laudit. laudit will not be built.])
-	AC_MSG_WARN([])
-	BUILD_LAUDIT="no"
-fi
-
-if test "x$BUILD_LAUDIT" = "xyes"; then
-AC_MSG_CHECKING([whether Lustre is audit-capable])
-AC_COMPILE_IFELSE([AC_LANG_SOURCE([
-	#include <$lustre_user_dir/lustre_user.h>
-
-	int main(void) {
-		enum changelog_rec_type type1 = CL_GETXATTR;
-		enum changelog_rec_type type2 = CL_DN_OPEN;
-	}
-])],[audit_capable="yes"],[audit_capable="no"])
-AC_MSG_RESULT([$audit_capable])
-if test "x$audit_capable" = "xno"; then
-	AC_MSG_WARN([])
-	AC_MSG_WARN([Lustre must be audit-capable for laudit. laudit will not be built.])
-	AC_MSG_WARN([])
-	BUILD_LAUDIT="no"
-fi
-fi
-
-AC_SUBST(BUILD_LAUDIT)
-AM_CONDITIONAL(BUILD_LAUDIT, test "$BUILD_LAUDIT" = "yes")
-
 # -------- check for distro version --------
 AC_MSG_CHECKING([for distro version])
 DISTRO=$(sh detect-distro.sh)
@@ -218,56 +136,6 @@ if test "x$PYLINT" = "x"; then
 	AC_MSG_ERROR([pylint is needed to check python coding style. Install pylint please.])
 fi
 
-# ------- check for protoc --------
-AC_CHECK_PROGS([PROTOC], [protoc], [])
-if test "x$PROTOC" = "x"; then
-	AC_MSG_ERROR([protoc is needed to compile Protobuf file. Install protoc please.])
-fi
-
-# -------- check whether enable zfs support --------
-AC_MSG_CHECKING([whether enable zfs support])
-AC_ARG_ENABLE([zfs],
-	AC_HELP_STRING([--enable-zfs],
-                       [enable zfs support]),
-        [], [enable_zfs="no"])
-AC_MSG_RESULT([$enable_zfs])
-AM_CONDITIONAL([ZFS], [test x$enable_zfs = xyes])
-
-AS_IF([test "x$enable_zfs" != xno ], [
-PKG_CHECK_MODULES([zfs], [libzfs], AC_DEFINE([HAVE_ZFS], [1], [enable ZFS support])]))
-
-AC_CHECK_HEADER([libzfs/libzutil.h],
-                [AC_DEFINE(HAVE_LIBZUTIL, 1, [libzutil.h exists])])
-# -------- check whether enable LPCC support for copytool --------
-AC_MSG_CHECKING([whether enable LPCC support for copytool])
-AC_ARG_ENABLE([copytool-lpcc],
-        AC_HELP_STRING([--enable-copytool-lpcc],
-                       [enable LPCC support for copytool]),
-        [], [enable_copytool_lpcc="no"])
-AC_MSG_RESULT([$enable_copytool_lpcc])
-AM_CONDITIONAL([COPYTOOL_LPCC], [test x$enable_copytool_lpcc = xyes])
-AS_IF([test "x$enable_copytool_lpcc" = xyes ],
-      [AC_DEFINE([HAVE_COPYTOOL_LPCC], [1], [enable LPCC support for copytool])])
-
-# -------- check for cached ISO --------
-AC_MSG_CHECKING([for cached ISO])
-AC_ARG_WITH([cached-iso],
-	AC_HELP_STRING([--with-cached-iso=path],
-		       [set path to cached ISO]),
-	[MB_ARG_CANON_PATH([cached-iso], [CACHED_ISO_PATH])],
-	[])
-AC_MSG_RESULT([$CACHED_ISO_PATH])
-AC_SUBST(CACHED_ISO_PATH)
-
-AS_IF([test "x$CACHED_ISO_PATH" != "x"],
-      [MB_CHECK_FILE([$CACHED_ISO_PATH], [],
-                     [AC_MSG_ERROR([cached ISO dir $CACHED_ISO_PATH could not be found.])])])
-
-dnl Pull the needed libraries into LIBS (needed for the AC_LINK_IFELSE below)
-dnl These should never fail if the PKG_CHECK above passes
-AC_SEARCH_LIBS([com_err], [com_err])
-AC_SEARCH_LIBS([ext2fs_open2], [ext2fs])
-
 LCRP_RELEASE="1"
 AC_DEFINE_UNQUOTED(RELEASE, "$LCRP_RELEASE", [release info] )
 AC_SUBST(LCRP_RELEASE)
@@ -276,5 +144,6 @@ AC_SUBST(LCRP_RELEASE)
 AC_SUBST(ac_configure_args)
 AC_CONFIG_FILES([Makefile
                  lcrp.spec
-                 src/Makefile])
+                 src/Makefile
+                 pylcrp/Makefile])
 AC_OUTPUT

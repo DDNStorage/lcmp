@@ -1,19 +1,33 @@
-SUBDIRS = src
+SUBDIRS = src pylcrp .
 
 build_dir = `pwd`/build
 rpmbuild_opt =
-ISO_PATH = `pwd`/ISO
-PACKAGE_PATH = ${ISO_PATH}/Packages
 
 AUTOMAKE_OPTIONS = -Wall foreign
 ACLOCAL_AMFLAGS = ${ALOCAL_FLAGS}
 
+PYTHON_COMMANDS = \
+	lcrpd
+
+dist_bin_SCRIPTS = lcrpd
+
 EXTRA_DIST= \
-	$(PYTHON_COMMANDS) \
 	detect-distro.sh \
 	lcrp.spec \
 	lcrp.spec.in \
 	lcrp_c_check.pl
+
+CHECKS = $(PYTHON_COMMANDS:%=%.python_checked)
+
+%.python_checked: % .pylintrc
+	PYLINTRC=.pylintrc pylint --disable=I $<
+	pep8 --ignore=E501 $<
+	touch $@
+
+check_clean-local:
+	rm -f $(CHECKS)
+
+check-local: $(CHECKS)
 
 check:
 	make check_clean

@@ -6,7 +6,7 @@ AM_CFLAGS = -Wall -Werror -g $(json_c_CFLAGS) $(json_c_LIBS) \
 
 bin_PROGRAMS = lcrp_changelog
 
-lcrp_SOURCES = lcrp_changelog.c
+lcrp_changelog_SOURCES = lcrp_changelog.c
 
 C_FILES = $(wildcard *.c *.h)
 C_CHECKS = $(C_FILES:%=%.c_checked)
