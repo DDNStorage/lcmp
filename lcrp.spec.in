@@ -57,7 +57,7 @@ mkdir -p $RPM_BUILD_ROOT%{python_sitelib}
 mkdir -p $RPM_BUILD_ROOT%{_mandir}/man1
 mkdir -p $RPM_BUILD_ROOT%{_mandir}/man5
 mkdir -p $RPM_BUILD_ROOT%{_sysconfdir}/yum.repos.d
-cp src/lcrp $RPM_BUILD_ROOT%{_bindir}
+cp src/lcrp_changelog $RPM_BUILD_ROOT%{_bindir}
 
 mkdir -p $RPM_BUILD_ROOT/usr/lib/systemd/system/
 install -m 0644 -D systemd/lcrp.service $RPM_BUILD_ROOT%{_unitdir}/lcrp.service
@@ -69,7 +69,7 @@ rm -rf $RPM_BUILD_ROOT
 
 %files
 %defattr(-,root,root)
-%{_bindir}/lcrp
+%{_bindir}/lcrp_changelog
 %{_unitdir}/lcrp.service
 
 

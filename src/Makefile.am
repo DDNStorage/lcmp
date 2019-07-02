@@ -4,9 +4,9 @@ ACLOCAL_AMFLAGS = ${ALOCAL_FLAGS}
 AM_CFLAGS = -Wall -Werror -g $(json_c_CFLAGS) $(json_c_LIBS) \
 	-llustreapi -lpthread
 
-bin_PROGRAMS = lcrp
+bin_PROGRAMS = lcrp_changelog
 
-lcrp_SOURCES = lcrp.c
+lcrp_SOURCES = lcrp_changelog.c
 
 C_FILES = $(wildcard *.c *.h)
 C_CHECKS = $(C_FILES:%=%.c_checked)

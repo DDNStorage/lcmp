@@ -1,6 +1,6 @@
 dnl Process this file with autoconf to produce a configure script.
 AC_INIT([lcrp], [m4_esyscmd(./version-gen.sh)], [lixi@ddn.com], [lcrp])
-AC_CONFIG_SRCDIR(./src/lcrp.c)
+AC_CONFIG_SRCDIR(./src/lcrp_changelog.c)
 AC_CONFIG_HEADERS(config.h)
 
 AM_INIT_AUTOMAKE([tar-pax dist-bzip2 foreign])
