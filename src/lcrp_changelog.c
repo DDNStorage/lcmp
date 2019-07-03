@@ -13,6 +13,7 @@
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <fcntl.h>
+#include <assert.h>
 #include <lustre/lustreapi.h>
 #include <lustre/lustre_user.h>
 
@@ -21,6 +22,9 @@
 #define LCRP_NAME_FIDS "fids"
 #define LCRP_NAME_INACTIVE "inactive"
 #define LCRP_NAME_SECONDARY "secondary"
+
+#define LCRP_INTERVAL_EOF 3
+#define LCRP_INTERVAL_RETRY 1
 
 struct lcrp_status {
 	/* Current working directory */
@@ -41,6 +45,13 @@ struct lcrp_status {
 	char ls_dir_inactive[PATH_MAX + 1];
 	/* Singal recieved so stopping */
 	bool ls_stopping;
+};
+
+enum changelog_record_status {
+	LRS_OK = 0, /* Got a record*/
+	LRS_RETRY = 1, /* Try to get the record again */
+	LRS_EOF = 2, /* No more record  */
+	LRS_RESTART = 3, /* Call llapi_changelog_start again  */
 };
 
 /* Command line options */
@@ -321,23 +332,51 @@ static int lcrp_update_fid(struct lu_fid *fid)
 	return rc;
 }
 
+/*
+ * return "enum changelog_record_status" if no error, or the error is
+ * recoverable; return negative error if unrecoverable failure.
+ */
+static int lcrp_changelog_recv(void *changelog_priv,
+			       struct changelog_rec **rec)
+{
+	int rc;
+
+	rc = llapi_changelog_recv(changelog_priv, rec);
+	switch (rc) {
+	case 0:
+		return LRS_OK;
+	case 1:	/* EOF */
+		return LRS_EOF;
+	case -EINVAL:  /* FS unmounted */
+	case -EPROTO:  /* error in KUC channel */
+		return LRS_RESTART;
+	case -EINTR: /* Interruption */
+		return LRS_RETRY;
+	default:
+		return rc;
+	}
+}
+
+/*
+ * return "enum changelog_record_status" if no error, or the error is
+ * recoverable; return negative error if unrecoverable failure.
+ */
 static int lcrp_changelog_parse_record(void *changelog_priv)
 {
 	int rc;
 	struct changelog_rec *rec;
 	struct lu_fid fid;
 
-	rc = llapi_changelog_recv(changelog_priv, &rec);
+	rc = lcrp_changelog_recv(changelog_priv, &rec);
 	if (rc < 0) {
 		fprintf(stderr, "failed to read changelog: %s\n",
 			strerror(-rc));
 		return rc;
+	} else if (rc == LRS_EOF || rc == LRS_RETRY || rc == LRS_RESTART) {
+		return rc;
 	}
 
-	/* no more to read */
-	if (rc)
-		return rc;
-
+	assert(rc == LRS_OK);
 	rc = lcrp_get_record_fid(rec, &fid);
 	if (rc) {
 		fprintf(stderr, "failed to get fid of record\n");
@@ -366,32 +405,13 @@ out:
 	return rc;
 }
 
-static int lcrp_main(void)
+/*
+ * return "enum changelog_record_status" if no error, or the error is
+ * recoverable; return negative error if unrecoverable failure.
+ */
+static int lcrp_changelog_parse_records(void *changelog_priv)
 {
-	void *changelog_priv;
 	int rc = 0;
-
-	rc = llapi_changelog_start(&changelog_priv,
-				   CHANGELOG_FLAG_BLOCK |
-				   CHANGELOG_FLAG_JOBID |
-				   CHANGELOG_FLAG_EXTRA_FLAGS,
-				   lcrp_status->ls_mdt_device, 0);
-	if (rc < 0) {
-		fprintf(stderr, "failed to open Changelog file for %s: %s\n",
-			lcrp_status->ls_mdt_device, strerror(-rc));
-		return rc;
-	}
-
-	rc = llapi_changelog_set_xflags(changelog_priv,
-					CHANGELOG_EXTRA_FLAG_UIDGID |
-					CHANGELOG_EXTRA_FLAG_NID |
-					CHANGELOG_EXTRA_FLAG_OMODE |
-					CHANGELOG_EXTRA_FLAG_XATTR);
-	if (rc < 0) {
-		fprintf(stderr, "failed to set xflags for Changelog: %s\n",
-			strerror(-rc));
-		goto out;
-	}
 
 	while (!lcrp_status->ls_stopping) {
 		rc = lcrp_changelog_parse_record(changelog_priv);
@@ -400,15 +420,68 @@ static int lcrp_main(void)
 				"failed to parse record of Changelog: %s\n",
 				strerror(-rc));
 			break;
-		} else if (rc) {
-			printf("all records of Changelog has been proceeded\n");
-			rc = 0;
+		} else if (rc == LRS_EOF) {
+			printf("no record to parse\n"
+			       "sleep for [%d] seconds waiting for new ones\n",
+			       LCRP_INTERVAL_EOF);
+			sleep(LCRP_INTERVAL_EOF);
 			break;
+		} else if (rc == LRS_RESTART) {
+			printf("sleep for [%d] seconds before restarting\n",
+			       LCRP_INTERVAL_RETRY);
+			sleep(LCRP_INTERVAL_RETRY);
+			break;
+		} else if (rc == LRS_RETRY) {
+			printf("temporary failure of getting record\n"
+			       "sleep for [%d] seconds before retry\n",
+			       LCRP_INTERVAL_RETRY);
+			sleep(LCRP_INTERVAL_RETRY);
+		} else {
+			assert(rc == 0);
 		}
 	}
+	return rc;
+}
 
-out:
-	llapi_changelog_fini(&changelog_priv);
+static int lcrp_main(void)
+{
+	int rc = 0;
+	void *changelog_priv;
+	enum changelog_send_flag flags =  (CHANGELOG_FLAG_BLOCK |
+					   CHANGELOG_FLAG_JOBID |
+					   CHANGELOG_FLAG_EXTRA_FLAGS);
+
+	while (!lcrp_status->ls_stopping) {
+		rc = llapi_changelog_start(&changelog_priv, flags,
+					   lcrp_status->ls_mdt_device, 0);
+		if (rc < 0) {
+			fprintf(stderr,
+				"failed to open Changelog file for %s: %s\n",
+				lcrp_status->ls_mdt_device, strerror(-rc));
+			break;
+		}
+
+		rc = llapi_changelog_set_xflags(changelog_priv,
+						CHANGELOG_EXTRA_FLAG_UIDGID |
+						CHANGELOG_EXTRA_FLAG_NID |
+						CHANGELOG_EXTRA_FLAG_OMODE |
+						CHANGELOG_EXTRA_FLAG_XATTR);
+		if (rc < 0) {
+			fprintf(stderr,
+				"failed to set xflags for Changelog: %s\n",
+				strerror(-rc));
+			llapi_changelog_fini(&changelog_priv);
+			break;
+		}
+
+		rc = lcrp_changelog_parse_records(changelog_priv);
+		if (rc < 0) {
+			fprintf(stderr, "failed to parse Changelog records\n");
+			break;
+		}
+
+		llapi_changelog_fini(&changelog_priv);
+	}
 	return rc;
 }
 
