@@ -9,7 +9,7 @@ ACLOCAL_AMFLAGS = ${ALOCAL_FLAGS}
 PYTHON_COMMANDS = \
 	lcrpd
 
-dist_bin_SCRIPTS = lcrpd
+dist_bin_SCRIPTS = lcrp
 
 EXTRA_DIST= \
 	detect-distro.sh \

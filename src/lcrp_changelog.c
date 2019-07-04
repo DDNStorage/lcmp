@@ -3,50 +3,15 @@
  *
  * Author: Li Xi lixi@ddn.com
  */
-#include <stdio.h>
-#include <getopt.h>
-#include <stdlib.h>
 #include <errno.h>
-#include <string.h>
-#include <signal.h>
 #include <unistd.h>
-#include <sys/stat.h>
-#include <sys/types.h>
 #include <fcntl.h>
 #include <lustre/lustreapi.h>
-#include <lustre/lustre_user.h>
 
 #include "debug.h"
 
-#define LCRP_MAXLEN 64
-#define LCRP_NAME_ACTIVE "active"
-#define LCRP_NAME_FIDS "fids"
-#define LCRP_NAME_INACTIVE "inactive"
-#define LCRP_NAME_SECONDARY "secondary"
-
 #define LCRP_INTERVAL_EOF 3
 #define LCRP_INTERVAL_RETRY 1
-
-struct lcrp_status {
-	/* Current working directory */
-	char ls_cwd[PATH_MAX + 1];
-	/* MDT device to get Changelog from */
-	char ls_mdt_device[LCRP_MAXLEN + 1];
-	/* Changelog user */
-	char ls_changelog_user[LCRP_MAXLEN + 1];
-	/* Root directory that saves the access history */
-	char ls_dir_access_history[PATH_MAX + 1];
-	/* Directory that saves all fids */
-	char ls_dir_fid[PATH_MAX + 1];
-	/* Directory of fids that are being actively accessed */
-	char ls_dir_active[PATH_MAX + 1];
-	/* Directory of current */
-	char ls_dir_secondary[PATH_MAX + 1];
-	/* Directory of current */
-	char ls_dir_inactive[PATH_MAX + 1];
-	/* Singal recieved so stopping */
-	bool ls_stopping;
-};
 
 enum changelog_record_status {
 	LRS_OK = 0, /* Got a record*/
@@ -54,47 +19,6 @@ enum changelog_record_status {
 	LRS_EOF = 2, /* No more record  */
 	LRS_RESTART = 3, /* Call llapi_changelog_start again  */
 };
-
-/* Command line options */
-struct option lcrp_long_opts[] = {
-	{ .val = 'd',	.name = "dir",		.has_arg = required_argument },
-	{ .val = 'm',	.name = "mdt",		.has_arg = required_argument },
-	{ .val = 'u',	.name = "user",		.has_arg = required_argument },
-	{ .name = NULL } };
-
-struct lcrp_status *lcrp_status;
-
-static void lcrp_fini(void)
-{
-	free(lcrp_status);
-}
-
-static int lcrp_init(void)
-{
-	int rc = 0;
-	char *cwd;
-	size_t size = sizeof(*lcrp_status);
-
-	lcrp_status = calloc(size, 1);
-	if (lcrp_status == NULL)
-		return -ENOMEM;
-
-	cwd = getcwd(lcrp_status->ls_cwd, sizeof(lcrp_status->ls_cwd));
-	if (cwd == NULL) {
-		LERROR("failed to get cwd: %s\n", strerror(errno));
-		rc = -errno;
-		goto error;
-	}
-	return 0;
-error:
-	lcrp_fini();
-	return rc;
-}
-
-static void lcrp_usage(void)
-{
-	LERROR("Usage: lcrp -d <access_history_directory> -m <fsname-MDTnumber> -u user\n");
-}
 
 static int lcrp_get_record_fid(struct changelog_rec *rec,
 			       struct lu_fid *fid)
@@ -148,7 +72,7 @@ static int lcrp_get_fid_path(const char *root, char *pbuffer, int psize,
 	return 0;
 }
 
-static int lcrp_find_or_mkdir(const char *path)
+int lcrp_find_or_mkdir(const char *path)
 {
 	int rc;
 	struct stat stat_buf;
@@ -208,12 +132,13 @@ static int lcrp_find_or_create(const char *path)
 	return 0;
 }
 
-static int lcrp_find_or_create_fid(char *buf, int buf_size, struct lu_fid *fid)
+static int lcrp_find_or_create_fid(const char *dir_fid, char *buf,
+				   int buf_size, struct lu_fid *fid)
 {
 	int rc;
 	char parent_path[PATH_MAX + 1];
 
-	rc = lcrp_get_fid_path(lcrp_status->ls_dir_fid, parent_path,
+	rc = lcrp_get_fid_path(dir_fid, parent_path,
 			       sizeof(parent_path), buf, buf_size, fid);
 	if (rc) {
 		LERROR("failed to get path of fid "DFID"\n",
@@ -307,20 +232,21 @@ static int lcrp_find_or_link_fid(const char *root, struct lu_fid *fid,
 	return 0;
 }
 
-static int lcrp_update_fid(struct lu_fid *fid)
+static int lcrp_update_fid(const char *dir_fid, const char *dir_active,
+			   struct lu_fid *fid)
 {
 	int rc;
 	char fid_path[PATH_MAX + 1];
 
-	LDEBUG("handling fid "DFID"\n", PFID(fid));
-	rc = lcrp_find_or_create_fid(fid_path, sizeof(fid_path), fid);
+	LINFO("handling fid "DFID"\n", PFID(fid));
+	rc = lcrp_find_or_create_fid(dir_fid, fid_path, sizeof(fid_path), fid);
 	if (rc) {
 		LERROR("failed to find path of FID "DFID"\n",
 			PFID(fid));
 		return rc;
 	}
 
-	rc = lcrp_find_or_link_fid(lcrp_status->ls_dir_active, fid, fid_path);
+	rc = lcrp_find_or_link_fid(dir_active, fid, fid_path);
 	if (rc) {
 		LERROR(
 			"failed to find or link FID "DFID" to active directory\n",
@@ -359,7 +285,11 @@ static int lcrp_changelog_recv(void *changelog_priv,
  * return "enum changelog_record_status" if no error, or the error is
  * recoverable; return negative error if unrecoverable failure.
  */
-static int lcrp_changelog_parse_record(void *changelog_priv)
+static int lcrp_changelog_parse_record(void *changelog_priv,
+				       const char *dir_fid,
+				       const char *dir_active,
+				       const char *mdt_device,
+				       const char *changelog_user)
 {
 	int rc;
 	struct changelog_rec *rec;
@@ -381,7 +311,7 @@ static int lcrp_changelog_parse_record(void *changelog_priv)
 		goto out;
 	}
 
-	rc = lcrp_update_fid(&fid);
+	rc = lcrp_update_fid(dir_fid, dir_active, &fid);
 	if (rc)  {
 		LERROR("failed to update access of fid "DFID"\n",
 			PFID(&fid));
@@ -389,8 +319,8 @@ static int lcrp_changelog_parse_record(void *changelog_priv)
 	}
 
 	/* clear entry */
-	rc = llapi_changelog_clear(lcrp_status->ls_mdt_device,
-				   lcrp_status->ls_changelog_user,
+	rc = llapi_changelog_clear(mdt_device,
+				   changelog_user,
 				   rec->cr_index);
 	if (rc) {
 		LERROR("failed to clear record %lld\n", rec->cr_index);
@@ -406,19 +336,26 @@ out:
  * return "enum changelog_record_status" if no error, or the error is
  * recoverable; return negative error if unrecoverable failure.
  */
-static int lcrp_changelog_parse_records(void *changelog_priv)
+static int lcrp_changelog_parse_records(void *changelog_priv,
+					const char *dir_fid,
+					const char *dir_active,
+					const char *mdt_device,
+					const char *changelog_user,
+					bool *stopping)
 {
 	int rc = 0;
 
-	while (!lcrp_status->ls_stopping) {
-		rc = lcrp_changelog_parse_record(changelog_priv);
+	while (!*stopping) {
+		rc = lcrp_changelog_parse_record(changelog_priv, dir_fid,
+						 dir_active, mdt_device,
+						 changelog_user);
 		if (rc < 0) {
 			LERROR("failed to parse record of Changelog: %s\n",
 			       strerror(-rc));
 			break;
 		} else if (rc == LRS_EOF) {
-			LDEBUG("no record to parse, sleep for [%d] seconds waiting for new ones\n",
-			       LCRP_INTERVAL_EOF);
+			LINFO("no record to parse, sleep for [%d] seconds waiting for new ones\n",
+			      LCRP_INTERVAL_EOF);
 			sleep(LCRP_INTERVAL_EOF);
 			break;
 		} else if (rc == LRS_RESTART) {
@@ -437,7 +374,13 @@ static int lcrp_changelog_parse_records(void *changelog_priv)
 	return rc;
 }
 
-static int lcrp_main(void)
+/*
+ * return "enum changelog_record_status" if no error, or the error is
+ * recoverable; return negative error if unrecoverable failure.
+ */
+int lcrp_changelog_consume(const char *dir_fid, const char *dir_active,
+			   const char *mdt_device, const char *changelog_user,
+			   bool *stopping)
 {
 	int rc = 0;
 	void *changelog_priv;
@@ -445,161 +388,33 @@ static int lcrp_main(void)
 					   CHANGELOG_FLAG_JOBID |
 					   CHANGELOG_FLAG_EXTRA_FLAGS);
 
-	while (!lcrp_status->ls_stopping) {
-		rc = llapi_changelog_start(&changelog_priv, flags,
-					   lcrp_status->ls_mdt_device, 0);
-		if (rc < 0) {
-			LERROR("failed to open Changelog file for %s: %s\n",
-			       lcrp_status->ls_mdt_device, strerror(-rc));
-			break;
-		}
-
-		rc = llapi_changelog_set_xflags(changelog_priv,
-						CHANGELOG_EXTRA_FLAG_UIDGID |
-						CHANGELOG_EXTRA_FLAG_NID |
-						CHANGELOG_EXTRA_FLAG_OMODE |
-						CHANGELOG_EXTRA_FLAG_XATTR);
-		if (rc < 0) {
-			LERROR("failed to set xflags for Changelog: %s\n",
-			       strerror(-rc));
-			llapi_changelog_fini(&changelog_priv);
-			break;
-		}
-
-		rc = lcrp_changelog_parse_records(changelog_priv);
-		if (rc < 0) {
-			LERROR("failed to parse Changelog records\n");
-			break;
-		}
-
-		llapi_changelog_fini(&changelog_priv);
-	}
-	return rc;
-}
-
-static int lcrp_init_dir(const char *dir_access_history)
-{
-	int rc;
-	char *resolved_path;
-	char path[PATH_MAX + 1];
-
-	if (strlen(dir_access_history) < 1) {
-		LERROR("unexpected zero length of access history directory\n");
-		return -EINVAL;
-	}
-
-	if (dir_access_history[0] == '/')
-		snprintf(path, sizeof(path), "%s", dir_access_history);
-	else
-		snprintf(path, sizeof(path), "%s/%s", lcrp_status->ls_cwd,
-			 dir_access_history);
-
-	resolved_path = realpath(path, lcrp_status->ls_dir_access_history);
-	if (resolved_path == NULL) {
-		LERROR("failed to get real path of %s\n", path);
-		return -errno;
-	}
-
-	snprintf(lcrp_status->ls_dir_fid, sizeof(lcrp_status->ls_dir_fid),
-		 "%s/%s", lcrp_status->ls_dir_access_history,
-		 LCRP_NAME_FIDS);
-	rc = lcrp_find_or_mkdir(lcrp_status->ls_dir_fid);
-	if (rc) {
-		LERROR("failed to find or create directory %s\n",
-			lcrp_status->ls_dir_fid);
+	rc = llapi_changelog_start(&changelog_priv, flags,
+				   mdt_device, 0);
+	if (rc < 0) {
+		LERROR("failed to open Changelog file for %s: %s\n",
+		       mdt_device, strerror(-rc));
 		return rc;
 	}
 
-	snprintf(lcrp_status->ls_dir_active,
-		 sizeof(lcrp_status->ls_dir_active), "%s/%s",
-		 lcrp_status->ls_dir_access_history, LCRP_NAME_ACTIVE);
-	snprintf(lcrp_status->ls_dir_secondary,
-		 sizeof(lcrp_status->ls_dir_secondary), "%s/%s",
-		 lcrp_status->ls_dir_access_history, LCRP_NAME_SECONDARY);
-	snprintf(lcrp_status->ls_dir_inactive,
-		 sizeof(lcrp_status->ls_dir_inactive), "%s/%s",
-		 lcrp_status->ls_dir_access_history, LCRP_NAME_INACTIVE);
-
-	return 0;
-}
-
-static void
-lcrp_signal_handler(int signum)
-{
-	/* Set a flag for the replicator to gracefully shutdown */
-	lcrp_status->ls_stopping = true;
-	/* just indicate we have to stop */
-	LINFO("received signal %d, stopping\n",
-	       signum);
-}
-
-
-int main(int argc, char *argv[])
-{
-	int rc;
-	const char *dir_access_history = NULL;
-
-	rc = lcrp_init();
-	if (rc) {
-		LERROR("failed to init status\n");
-		return rc;
+	rc = llapi_changelog_set_xflags(changelog_priv,
+					CHANGELOG_EXTRA_FLAG_UIDGID |
+					CHANGELOG_EXTRA_FLAG_NID |
+					CHANGELOG_EXTRA_FLAG_OMODE |
+					CHANGELOG_EXTRA_FLAG_XATTR);
+	if (rc < 0) {
+		LERROR("failed to set xflags for Changelog: %s\n",
+		       strerror(-rc));
+		goto out;
 	}
 
-	while ((rc = getopt_long(argc, argv, "d:m:u:",
-				 lcrp_long_opts, NULL)) >= 0) {
-		switch (rc) {
-		case 'd':
-			dir_access_history = optarg;
-			break;
-		case 'm':
-			snprintf(lcrp_status->ls_mdt_device,
-				 sizeof(lcrp_status->ls_mdt_device),
-				 "%s", optarg);
-			break;
-		case 'u':
-			snprintf(lcrp_status->ls_changelog_user,
-				 sizeof(lcrp_status->ls_changelog_user),
-				 "%s", optarg);
-			break;
-		default:
-			LERROR("option '%s' unrecognized\n",
-				argv[optind - 1]);
-			lcrp_usage();
-			goto out;
-		}
+	rc = lcrp_changelog_parse_records(changelog_priv, dir_fid, dir_active,
+					  mdt_device, changelog_user, stopping);
+	if (rc < 0) {
+		LERROR("failed to parse Changelog records\n");
+		goto out;
 	}
 
-	if (dir_access_history == NULL) {
-		LERROR("please specify the root directory for saving access history by using -d option\n");
-		lcrp_usage();
-		return -1;
-	}
-
-	rc = lcrp_init_dir(dir_access_history);
-	if (rc) {
-		LERROR("failed to init access history directory %s\n",
-		       dir_access_history);
-		return -1;
-	}
-
-	if (lcrp_status->ls_mdt_device[0] == '\0') {
-		LERROR("please specify the MDT device by using -m option\n");
-		lcrp_usage();
-		return -1;
-	}
-
-	if (lcrp_status->ls_changelog_user[0] == '\0') {
-		LERROR("please specify the Changelog user by using -u option\n");
-		lcrp_usage();
-		return -1;
-	}
-
-	signal(SIGINT, lcrp_signal_handler);
-	signal(SIGHUP, lcrp_signal_handler);
-	signal(SIGTERM, lcrp_signal_handler);
-
-	rc = lcrp_main();
 out:
-	lcrp_fini();
+	llapi_changelog_fini(&changelog_priv);
 	return rc;
 }

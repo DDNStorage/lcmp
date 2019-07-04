@@ -2,11 +2,10 @@ AUTOMAKE_OPTIONS = -Wall foreign
 ACLOCAL_AMFLAGS = ${ALOCAL_FLAGS}
 
 AM_CFLAGS = -Wall -Werror -g $(json_c_CFLAGS) $(json_c_LIBS) \
-	-llustreapi -lpthread
+	-llustreapi -lpthread -lyaml
 
-bin_PROGRAMS = lcrp_changelog
-
-lcrp_changelog_SOURCES = lcrp_changelog.c debug.c debug.h
+bin_PROGRAMS = lcrpd
+lcrpd_SOURCES = lcrp_changelog.c debug.c debug.h lcrpd.h lcrpd.c
 
 C_FILES = $(wildcard *.c *.h)
 C_CHECKS = $(C_FILES:%=%.c_checked)
