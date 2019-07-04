@@ -3,9 +3,9 @@
 # All Rights Reserved.
 # Author: lixi@ddn.com
 """
-Run LCRP Daemon
+Run LCRP
 """
-from pylcrp import lcrpd
+from pylcrp import lcrp
 
 if __name__ == "__main__":
-    lcrpd.main()
+    lcrp.main()
