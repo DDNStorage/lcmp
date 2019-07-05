@@ -142,6 +142,77 @@ static int lcrp_init_dir(void)
 	return 0;
 }
 
+void *lcrp_changelog_thread(void *arg)
+{
+	int rc;
+	struct lcrp_changelog_thread_info *info = arg;
+
+	while ((!lcrp_status->ls_stopping) && !(info->lcti_stopping)) {
+		rc = lcrp_changelog_consume(lcrp_status->ls_dir_fid,
+					    lcrp_status->ls_dir_active,
+					    lcrp_status->ls_mdt_device,
+					    lcrp_status->ls_changelog_user,
+					    &lcrp_status->ls_stopping);
+		if (rc < 0) {
+			LERROR("failed to consume changelog\n");
+			break;
+		} else {
+			rc = 0;
+		}
+	}
+	info->lcti_stopped = true;
+	return NULL;
+}
+
+static int lcrp_changelog_thread_stop(struct lcrp_changelog_thread_info *info)
+{
+	int rc;
+
+	if (!info->lcti_started)
+		return 0;
+
+	info->lcti_stopping = true;
+
+	rc = pthread_join(info->lcti_thread_id, NULL);
+	if (rc) {
+		LERROR("failed to join thread [%d]\n",
+		       info->lcti_thread_id);
+	}
+	return rc;
+}
+
+static int lcrp_changelog_thread_start(struct lcrp_changelog_thread_info *info)
+{
+	int rc;
+	int ret;
+	pthread_attr_t attr;
+
+	rc = pthread_attr_init(&attr);
+	if (rc) {
+		LERROR("failed to set pthread attribute\n");
+		return rc;
+	}
+
+	rc = pthread_create(&info->lcti_thread_id, &attr,
+			    &lcrp_changelog_thread, info);
+	if (rc == 0)
+		info->lcti_started = true;
+
+	ret = pthread_attr_destroy(&attr);
+	if (ret) {
+		LERROR("failed to destroy thread attribute\n");
+		if (rc == 0)
+			rc = ret;
+	}
+
+	if (rc) {
+		ret = lcrp_changelog_thread_stop(info);
+		if (ret)
+			LERROR("failed to stop thread\n");
+	}
+	return rc;
+}
+
 static void
 lcrp_signal_handler(int signum)
 {
@@ -156,7 +227,6 @@ int main(int argc, char *argv[])
 {
 	int rc;
 	FILE *config;
-	//bool done = false;
 	yaml_token_t token;
 	yaml_parser_t parser;
 	char key[PATH_MAX + 1];
@@ -279,18 +349,19 @@ int main(int argc, char *argv[])
 	signal(SIGHUP, lcrp_signal_handler);
 	signal(SIGTERM, lcrp_signal_handler);
 
-	while (!lcrp_status->ls_stopping) {
-		rc = lcrp_changelog_consume(lcrp_status->ls_dir_fid,
-					    lcrp_status->ls_dir_active,
-					    lcrp_status->ls_mdt_device,
-					    lcrp_status->ls_changelog_user,
-					    &lcrp_status->ls_stopping);
-		if (rc < 0) {
-			LERROR("failed to consume changelog\n");
-			break;
-		} else {
-			rc = 0;
-		}
+	rc = lcrp_changelog_thread_start(&lcrp_status->ls_info);
+	if (rc) {
+		LERROR("failed to start Changelog thread\n");
+		goto out;
+	}
+
+	while (!lcrp_status->ls_stopping)
+		sleep(1);
+
+	rc = lcrp_changelog_thread_stop(&lcrp_status->ls_info);
+	if (rc) {
+		LERROR("failed to stop Changelog thread\n");
+		goto out;
 	}
 out:
 	lcrp_fini();

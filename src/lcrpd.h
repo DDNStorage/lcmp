@@ -7,6 +7,8 @@
 #ifndef _LCRPD_H_
 #define _LCRPD_H_
 
+#include <pthread.h>
+
 #define LCRP_MAXLEN 64
 #define LCRPD_CONFIG "/etc/lcrpd.conf"
 #define LCRP_STR_CHANGELOG_USER		"changelog_user"
@@ -17,6 +19,19 @@
 #define LCRP_NAME_FIDS "fids"
 #define LCRP_NAME_INACTIVE "inactive"
 #define LCRP_NAME_SECONDARY "secondary"
+
+struct lcrp_changelog_thread_info {
+	/* MDT device to get Changelog from */
+	char			 lcti_mdt_device[LCRP_MAXLEN + 1];
+	/* ID returned by pthread_create() */
+	pthread_t		 lcti_thread_id;
+	/* Thread is started */
+	bool			 lcti_started;
+	/* Thread is asked to stop */
+	bool			 lcti_stopping;
+	/* Thread is stopped */
+	bool			 lcti_stopped;
+};
 
 struct lcrp_status {
 	/* Current working directory */
@@ -37,6 +52,10 @@ struct lcrp_status {
 	char ls_dir_inactive[PATH_MAX + 1];
 	/* Singal recieved so stopping */
 	bool ls_stopping;
+	/* Lock to protect when epoch changes */
+	pthread_mutex_t	ls_mutex;
+	/* Info of Changlog thread */
+	struct lcrp_changelog_thread_info ls_info;
 };
 
 #endif /* _LCRPD_H_ */
