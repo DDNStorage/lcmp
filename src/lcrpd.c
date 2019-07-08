@@ -198,8 +198,9 @@ void *lcrp_changelog_thread(void *arg)
 	int rc;
 	struct lcrp_epoch *epoch = &lcrp_status->ls_epoch;
 	struct lcrp_changelog_thread_info *info = arg;
+	struct lcrp_thread_info *general = &info->lcti_general;
 
-	while ((!lcrp_status->ls_stopping) && !(info->lcti_stopping)) {
+	while ((!lcrp_status->ls_stopping) && !(general->lti_stopping)) {
 		rc = lcrp_changelog_consume(lcrp_status->ls_dir_fid,
 					    epoch,
 					    lcrp_status->ls_mdt_device,
@@ -212,28 +213,30 @@ void *lcrp_changelog_thread(void *arg)
 			rc = 0;
 		}
 	}
-	info->lcti_stopped = true;
+	general->lti_stopped = true;
 	return NULL;
 }
 
-static int lcrp_changelog_thread_stop(struct lcrp_changelog_thread_info *info)
+static int lcrp_thread_stop(struct lcrp_thread_info *info)
 {
 	int rc;
 
-	if (!info->lcti_started)
+	if (!info->lti_started)
 		return 0;
 
-	info->lcti_stopping = true;
+	info->lti_stopping = true;
 
-	rc = pthread_join(info->lcti_thread_id, NULL);
+	rc = pthread_join(info->lti_thread_id, NULL);
 	if (rc) {
 		LERROR("failed to join thread [%d]\n",
-		       info->lcti_thread_id);
+		       info->lti_thread_id);
 	}
 	return rc;
 }
 
-static int lcrp_changelog_thread_start(struct lcrp_changelog_thread_info *info)
+static int lcrp_thread_start(struct lcrp_thread_info *info,
+			     void *(*start_routine)(void *),
+			     void *private_info)
 {
 	int rc;
 	int ret;
@@ -245,10 +248,10 @@ static int lcrp_changelog_thread_start(struct lcrp_changelog_thread_info *info)
 		return rc;
 	}
 
-	rc = pthread_create(&info->lcti_thread_id, &attr,
-			    &lcrp_changelog_thread, info);
+	rc = pthread_create(&info->lti_thread_id, &attr,
+			    start_routine, private_info);
 	if (rc == 0)
-		info->lcti_started = true;
+		info->lti_started = true;
 
 	ret = pthread_attr_destroy(&attr);
 	if (ret) {
@@ -258,7 +261,7 @@ static int lcrp_changelog_thread_start(struct lcrp_changelog_thread_info *info)
 	}
 
 	if (rc) {
-		ret = lcrp_changelog_thread_stop(info);
+		ret = lcrp_thread_stop(info);
 		if (ret)
 			LERROR("failed to stop thread\n");
 	}
@@ -567,7 +570,9 @@ int main(int argc, char *argv[])
 	signal(SIGHUP, lcrp_signal_handler);
 	signal(SIGTERM, lcrp_signal_handler);
 
-	rc = lcrp_changelog_thread_start(&lcrp_status->ls_info);
+	rc = lcrp_thread_start(&lcrp_status->ls_info.lcti_general,
+			       &lcrp_changelog_thread,
+			       &lcrp_status->ls_info);
 	if (rc) {
 		LERROR("failed to start Changelog thread\n");
 		goto out;
@@ -582,7 +587,7 @@ int main(int argc, char *argv[])
 		}
 	}
 
-	rc = lcrp_changelog_thread_stop(&lcrp_status->ls_info);
+	rc = lcrp_thread_stop(&lcrp_status->ls_info.lcti_general);
 	if (rc) {
 		LERROR("failed to stop Changelog thread\n");
 		goto out;

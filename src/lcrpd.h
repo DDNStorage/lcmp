@@ -25,17 +25,22 @@
 #define LCRP_NAME_INACTIVE "inactive"
 #define LCRP_NAME_SECONDARY "secondary"
 
+struct lcrp_thread_info {
+	/* ID returned by pthread_create() */
+	pthread_t		 lti_thread_id;
+	/* Thread is started */
+	bool			 lti_started;
+	/* Thread is asked to stop */
+	bool			 lti_stopping;
+	/* Thread is stopped */
+	bool			 lti_stopped;
+};
+
 struct lcrp_changelog_thread_info {
 	/* MDT device to get Changelog from */
-	char			 lcti_mdt_device[LCRP_MAXLEN + 1];
-	/* ID returned by pthread_create() */
-	pthread_t		 lcti_thread_id;
-	/* Thread is started */
-	bool			 lcti_started;
-	/* Thread is asked to stop */
-	bool			 lcti_stopping;
-	/* Thread is stopped */
-	bool			 lcti_stopped;
+	char			lcti_mdt_device[LCRP_MAXLEN + 1];
+	/* General thread info */
+	struct lcrp_thread_info	lcti_general;
 };
 
 struct lcrp_status {
