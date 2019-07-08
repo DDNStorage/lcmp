@@ -9,6 +9,7 @@
 #include <lustre/lustreapi.h>
 
 #include "debug.h"
+#include "lcrpd.h"
 
 #define LCRP_INTERVAL_EOF 3
 #define LCRP_INTERVAL_RETRY 1
@@ -232,7 +233,7 @@ static int lcrp_find_or_link_fid(const char *root, struct lu_fid *fid,
 	return 0;
 }
 
-static int lcrp_update_fid(const char *dir_fid, const char *dir_active,
+static int lcrp_update_fid(const char *dir_fid, struct lcrp_epoch *epoch,
 			   struct lu_fid *fid)
 {
 	int rc;
@@ -246,7 +247,9 @@ static int lcrp_update_fid(const char *dir_fid, const char *dir_active,
 		return rc;
 	}
 
-	rc = lcrp_find_or_link_fid(dir_active, fid, fid_path);
+	pthread_mutex_lock(&epoch->le_mutex);
+	rc = lcrp_find_or_link_fid(epoch->le_dir_active, fid, fid_path);
+	pthread_mutex_unlock(&epoch->le_mutex);
 	if (rc) {
 		LERROR(
 			"failed to find or link FID "DFID" to active directory\n",
@@ -287,7 +290,7 @@ static int lcrp_changelog_recv(void *changelog_priv,
  */
 static int lcrp_changelog_parse_record(void *changelog_priv,
 				       const char *dir_fid,
-				       const char *dir_active,
+				       struct lcrp_epoch *epoch,
 				       const char *mdt_device,
 				       const char *changelog_user)
 {
@@ -311,7 +314,7 @@ static int lcrp_changelog_parse_record(void *changelog_priv,
 		goto out;
 	}
 
-	rc = lcrp_update_fid(dir_fid, dir_active, &fid);
+	rc = lcrp_update_fid(dir_fid, epoch, &fid);
 	if (rc)  {
 		LERROR("failed to update access of fid "DFID"\n",
 			PFID(&fid));
@@ -338,7 +341,7 @@ out:
  */
 static int lcrp_changelog_parse_records(void *changelog_priv,
 					const char *dir_fid,
-					const char *dir_active,
+					struct lcrp_epoch *epoch,
 					const char *mdt_device,
 					const char *changelog_user,
 					bool *stopping)
@@ -347,7 +350,7 @@ static int lcrp_changelog_parse_records(void *changelog_priv,
 
 	while (!*stopping) {
 		rc = lcrp_changelog_parse_record(changelog_priv, dir_fid,
-						 dir_active, mdt_device,
+						 epoch, mdt_device,
 						 changelog_user);
 		if (rc < 0) {
 			LERROR("failed to parse record of Changelog: %s\n",
@@ -378,7 +381,7 @@ static int lcrp_changelog_parse_records(void *changelog_priv,
  * return "enum changelog_record_status" if no error, or the error is
  * recoverable; return negative error if unrecoverable failure.
  */
-int lcrp_changelog_consume(const char *dir_fid, const char *dir_active,
+int lcrp_changelog_consume(const char *dir_fid, struct lcrp_epoch *epoch,
 			   const char *mdt_device, const char *changelog_user,
 			   bool *stopping)
 {
@@ -407,7 +410,7 @@ int lcrp_changelog_consume(const char *dir_fid, const char *dir_active,
 		goto out;
 	}
 
-	rc = lcrp_changelog_parse_records(changelog_priv, dir_fid, dir_active,
+	rc = lcrp_changelog_parse_records(changelog_priv, dir_fid, epoch,
 					  mdt_device, changelog_user, stopping);
 	if (rc < 0) {
 		LERROR("failed to parse Changelog records\n");

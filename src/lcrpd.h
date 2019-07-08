@@ -7,13 +7,16 @@
 #ifndef _LCRPD_H_
 #define _LCRPD_H_
 
-#include <pthread.h>
+#include "lcrp_changelog.h"
 
+/* Minimal number of epoch interval */
+#define LCRP_MIN_EPOCH_INTERVAL 10
 #define LCRP_MAXLEN 64
 #define LCRPD_CONFIG "/etc/lcrpd.conf"
-#define LCRP_STR_CHANGELOG_USER		"changelog_user"
-#define LCRP_STR_LCRP_DIR		"lcrp_dir"
-#define LCRP_STR_LCRP_MDT_DEVICE	"mdt_device"
+#define LCRP_STR_CHANGELOG_USER	"changelog_user"
+#define LCRP_STR_LCRP_DIR	"lcrp_dir"
+#define LCRP_STR_MDT_DEVICE	"mdt_device"
+#define LCRP_STR_EPOCH_INTERVAL	"epoch_interval"
 
 #define LCRP_NAME_ACTIVE "active"
 #define LCRP_NAME_FIDS "fids"
@@ -46,16 +49,15 @@ struct lcrp_status {
 	char ls_dir_fid[PATH_MAX + 1];
 	/* Directory of fids that are being actively accessed */
 	char ls_dir_active[PATH_MAX + 1];
-	/* Directory of current */
+	/* Directory of secondary */
 	char ls_dir_secondary[PATH_MAX + 1];
-	/* Directory of current */
+	/* Directory of inactive */
 	char ls_dir_inactive[PATH_MAX + 1];
 	/* Singal recieved so stopping */
 	bool ls_stopping;
-	/* Lock to protect when epoch changes */
-	pthread_mutex_t	ls_mutex;
 	/* Info of Changlog thread */
 	struct lcrp_changelog_thread_info ls_info;
+	struct lcrp_epoch ls_epoch;
 };
 
 #endif /* _LCRPD_H_ */

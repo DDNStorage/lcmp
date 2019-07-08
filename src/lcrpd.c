@@ -10,6 +10,8 @@
 #include <stdlib.h>
 #include <signal.h>
 #include <linux/limits.h>
+#include <sys/time.h>
+
 #include "debug.h"
 #include "lcrp_changelog.h"
 #include "lcrpd.h"
@@ -23,18 +25,24 @@ struct lcrp_status *lcrp_status;
 
 static void lcrp_fini(void)
 {
+	struct lcrp_epoch *epoch = &lcrp_status->ls_epoch;
+
+	pthread_mutex_destroy(&epoch->le_mutex);
 	free(lcrp_status);
 }
 
 static int lcrp_init(void)
 {
-	int rc = 0;
 	char *cwd;
+	int rc = 0;
+	struct lcrp_epoch *epoch;
 	size_t size = sizeof(*lcrp_status);
 
 	lcrp_status = calloc(size, 1);
 	if (lcrp_status == NULL)
 		return -ENOMEM;
+
+	epoch = &lcrp_status->ls_epoch;
 
 	cwd = getcwd(lcrp_status->ls_cwd, sizeof(lcrp_status->ls_cwd));
 	if (cwd == NULL) {
@@ -42,6 +50,8 @@ static int lcrp_init(void)
 		rc = -errno;
 		goto error;
 	}
+	epoch->le_seconds = 3600;
+	pthread_mutex_init(&epoch->le_mutex, NULL);
 	return 0;
 error:
 	lcrp_fini();
@@ -61,6 +71,9 @@ enum lcrp_yaml_status {
 
 static int lcrp_set_key_value(const char *key, const char *value)
 {
+	char *end;
+	struct lcrp_epoch *epoch = &lcrp_status->ls_epoch;
+
 	if (strcmp(key, LCRP_STR_CHANGELOG_USER) == 0) {
 		if (strlen(value) + 1 >
 		    sizeof(lcrp_status->ls_changelog_user)) {
@@ -79,7 +92,7 @@ static int lcrp_set_key_value(const char *key, const char *value)
 		}
 
 		strcpy(lcrp_status->ls_dir_access_history, value);
-	} else if (strcmp(key, LCRP_STR_LCRP_MDT_DEVICE) == 0) {
+	} else if (strcmp(key, LCRP_STR_MDT_DEVICE) == 0) {
 		if (strlen(value) + 1 >
 		    sizeof(lcrp_status->ls_mdt_device)) {
 			LERROR("value of key/value [%s = %s] is too long\n",
@@ -88,6 +101,18 @@ static int lcrp_set_key_value(const char *key, const char *value)
 		}
 
 		strcpy(lcrp_status->ls_mdt_device, value);
+	}  else if (strcmp(key, LCRP_STR_EPOCH_INTERVAL) == 0) {
+		epoch->le_seconds = strtoul(value, &end, 0);
+		if (*end != '\0') {
+			LERROR("invalid value of key/value [%s = %s], should be number\n",
+			       key, value, LCRP_MIN_EPOCH_INTERVAL);
+			return -EINVAL;
+		}
+		if (epoch->le_seconds < LCRP_MIN_EPOCH_INTERVAL) {
+			LERROR("too small epoch interval in [%s = %s], should >= %d\n",
+			       key, value, LCRP_MIN_EPOCH_INTERVAL);
+			return -EINVAL;
+		}
 	} else {
 		LERROR("unknown key %s\n", key);
 		return -EINVAL;
@@ -115,7 +140,7 @@ static int lcrp_init_dir(void)
 
 	resolved_path = realpath(path, lcrp_status->ls_dir_access_history);
 	if (resolved_path == NULL) {
-		LERROR("failed to get real path of %s\n", path);
+		LERROR("failed to get real path of [%s]\n", path);
 		return -errno;
 	}
 
@@ -124,7 +149,7 @@ static int lcrp_init_dir(void)
 		 LCRP_NAME_FIDS);
 	rc = lcrp_find_or_mkdir(lcrp_status->ls_dir_fid);
 	if (rc) {
-		LERROR("failed to find or create directory %s\n",
+		LERROR("failed to find or create directory [%s]\n",
 			lcrp_status->ls_dir_fid);
 		return rc;
 	}
@@ -132,24 +157,44 @@ static int lcrp_init_dir(void)
 	snprintf(lcrp_status->ls_dir_active,
 		 sizeof(lcrp_status->ls_dir_active), "%s/%s",
 		 lcrp_status->ls_dir_access_history, LCRP_NAME_ACTIVE);
+	rc = lcrp_find_or_mkdir(lcrp_status->ls_dir_active);
+	if (rc) {
+		LERROR("failed to find or create directory [%s]\n",
+			lcrp_status->ls_dir_active);
+		return rc;
+	}
+
 	snprintf(lcrp_status->ls_dir_secondary,
 		 sizeof(lcrp_status->ls_dir_secondary), "%s/%s",
 		 lcrp_status->ls_dir_access_history, LCRP_NAME_SECONDARY);
+	rc = lcrp_find_or_mkdir(lcrp_status->ls_dir_secondary);
+	if (rc) {
+		LERROR("failed to find or create directory [%s]\n",
+			lcrp_status->ls_dir_secondary);
+		return rc;
+	}
+
 	snprintf(lcrp_status->ls_dir_inactive,
 		 sizeof(lcrp_status->ls_dir_inactive), "%s/%s",
 		 lcrp_status->ls_dir_access_history, LCRP_NAME_INACTIVE);
-
+	rc = lcrp_find_or_mkdir(lcrp_status->ls_dir_inactive);
+	if (rc) {
+		LERROR("failed to find or create directory [%s]\n",
+			lcrp_status->ls_dir_inactive);
+		return rc;
+	}
 	return 0;
 }
 
 void *lcrp_changelog_thread(void *arg)
 {
 	int rc;
+	struct lcrp_epoch *epoch = &lcrp_status->ls_epoch;
 	struct lcrp_changelog_thread_info *info = arg;
 
 	while ((!lcrp_status->ls_stopping) && !(info->lcti_stopping)) {
 		rc = lcrp_changelog_consume(lcrp_status->ls_dir_fid,
-					    lcrp_status->ls_dir_active,
+					    epoch,
 					    lcrp_status->ls_mdt_device,
 					    lcrp_status->ls_changelog_user,
 					    &lcrp_status->ls_stopping);
@@ -223,15 +268,59 @@ lcrp_signal_handler(int signum)
 	       signum);
 }
 
+static int _lcrp_epoch_update(struct lcrp_epoch *epoch, int current_second)
+{
+	int rc;
+	int interval = epoch->le_seconds;
+
+	pthread_mutex_lock(&epoch->le_mutex);
+	epoch->le_start = current_second;
+	epoch->le_end = current_second + interval;
+	snprintf(epoch->le_dir_active, sizeof(epoch->le_dir_active),
+		 "%s/%d-%d", lcrp_status->ls_dir_active,
+		 epoch->le_start, epoch->le_end);
+	rc = lcrp_find_or_mkdir(epoch->le_dir_active);
+	if (rc) {
+		LERROR("failed to find or create directory [%s]\n",
+		       epoch->le_dir_active);
+		goto out;
+	}
+out:
+	pthread_mutex_unlock(&epoch->le_mutex);
+	LERROR("updated epoch to [%d-%d]", epoch->le_start, epoch->le_end);
+	return rc;
+}
+
+static int lcrp_epoch_update(void)
+{
+	int rc;
+	int seconds;
+	struct timeval this_time;
+	struct lcrp_epoch *epoch = &lcrp_status->ls_epoch;
+	int interval = epoch->le_seconds;
+
+	gettimeofday(&this_time, NULL);
+	seconds = this_time.tv_sec;
+	seconds = seconds / interval * interval;
+	if (seconds != epoch->le_start) {
+		rc = _lcrp_epoch_update(epoch, seconds);
+		if (rc) {
+			LERROR("failed to update epoch\n");
+			return rc;
+		}
+	}
+	return 0;
+}
+
 int main(int argc, char *argv[])
 {
 	int rc;
+	char *scalar;
 	FILE *config;
 	yaml_token_t token;
 	yaml_parser_t parser;
 	char key[PATH_MAX + 1];
 	char value[PATH_MAX + 1];
-	char *scalar;
 	const char *config_fpath = LCRPD_CONFIG;
 	enum lcrp_yaml_status yaml_status = LYS_INIT;
 
@@ -333,7 +422,7 @@ int main(int argc, char *argv[])
 
 	if (lcrp_status->ls_mdt_device[0] == '\0') {
 		LERROR("[%s] is not configured in [%s]\n",
-		       LCRP_STR_LCRP_MDT_DEVICE, config_fpath);
+		       LCRP_STR_MDT_DEVICE, config_fpath);
 		rc = -EINVAL;
 		goto out;
 	}
@@ -342,6 +431,12 @@ int main(int argc, char *argv[])
 		LERROR("[%s] is not configured in [%s]\n",
 		       LCRP_STR_CHANGELOG_USER, config_fpath);
 		rc = -EINVAL;
+		goto out;
+	}
+
+	rc = lcrp_epoch_update();
+	if (rc) {
+		LERROR("failed to init epoch\n");
 		goto out;
 	}
 
@@ -355,8 +450,14 @@ int main(int argc, char *argv[])
 		goto out;
 	}
 
-	while (!lcrp_status->ls_stopping)
+	while (!lcrp_status->ls_stopping) {
 		sleep(1);
+		rc = lcrp_epoch_update();
+		if (rc) {
+			LERROR("failed to init epoch\n");
+			goto out;
+		}
+	}
 
 	rc = lcrp_changelog_thread_stop(&lcrp_status->ls_info);
 	if (rc) {
