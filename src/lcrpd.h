@@ -11,6 +11,8 @@
 
 /* Minimal number of epoch interval */
 #define LCRP_MIN_EPOCH_INTERVAL 10
+/* Maximum number of epoch interval, 100 days */
+#define LCRP_MAX_EPOCH_INTERVAL 8640000
 #define LCRP_MAXLEN 64
 #define LCRPD_CONFIG "/etc/lcrpd.conf"
 #define LCRP_STR_CHANGELOG_USER	"changelog_user"
@@ -57,6 +59,7 @@ struct lcrp_status {
 	bool ls_stopping;
 	/* Info of Changlog thread */
 	struct lcrp_changelog_thread_info ls_info;
+	/* Epoch that could change from to time */
 	struct lcrp_epoch ls_epoch;
 };
 

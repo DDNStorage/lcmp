@@ -11,6 +11,8 @@
 #include <signal.h>
 #include <linux/limits.h>
 #include <sys/time.h>
+#include <sys/types.h>
+#include <dirent.h>
 
 #include "debug.h"
 #include "lcrp_changelog.h"
@@ -111,6 +113,11 @@ static int lcrp_set_key_value(const char *key, const char *value)
 		if (epoch->le_seconds < LCRP_MIN_EPOCH_INTERVAL) {
 			LERROR("too small epoch interval in [%s = %s], should >= %d\n",
 			       key, value, LCRP_MIN_EPOCH_INTERVAL);
+			return -EINVAL;
+		}
+		if (epoch->le_seconds > LCRP_MAX_EPOCH_INTERVAL) {
+			LERROR("too large epoch interval in [%s = %s], should <= %d\n",
+			       key, value, LCRP_MAX_EPOCH_INTERVAL);
 			return -EINVAL;
 		}
 	} else {
@@ -268,17 +275,132 @@ lcrp_signal_handler(int signum)
 	       signum);
 }
 
+static int lcrp_degrade_directory(struct lcrp_epoch *epoch, bool active)
+{
+	int end;
+	DIR *dir;
+	int start;
+	int rc = 0;
+	const char *root;
+	struct dirent *dirent;
+	char subdir[PATH_MAX + 1];
+	char newdir[PATH_MAX + 1];
+
+	if (active)
+		root = lcrp_status->ls_dir_active;
+	else
+		root = lcrp_status->ls_dir_secondary;
+
+	dir = opendir(root);
+	if (dir == NULL) {
+		LERROR("failed to open directory [%s]: %s\n",
+		       root, strerror(errno));
+		rc = -errno;
+		goto out;
+	}
+
+	while (true) {
+		errno = 0;
+		dirent = readdir(dir);
+		if (dirent == NULL) {
+			if (errno != 0) {
+				LERROR("failed to read directory [%s]: %s\n",
+				       root,
+				       strerror(errno));
+				rc = -errno;
+			}
+			break;
+		}
+
+		if (strlen(dirent->d_name) == 1 && dirent->d_name[0] == '.')
+			continue;
+		if (strlen(dirent->d_name) == 2 && dirent->d_name[1] == '.' &&
+		    dirent->d_name[1] == '.')
+			continue;
+
+		snprintf(subdir, sizeof(subdir), "%s/%s", root,
+			 dirent->d_name);
+		if (sscanf(dirent->d_name, "%d-%d", &start, &end) != 2) {
+			LERROR("invalid name pattern of file [%s], ignoring\n",
+			       subdir);
+			continue;
+		}
+		if (start >= end) {
+			LERROR("invalid start/end of file [%s], ignoring\n",
+			       subdir);
+			continue;
+		}
+		if (end <= epoch->le_start - epoch->le_seconds) {
+			LDEBUG("[%s] is inactive\n", subdir);
+			snprintf(newdir, sizeof(newdir), "%s/%s",
+				 lcrp_status->ls_dir_inactive, dirent->d_name);
+			rc = rename(subdir, newdir);
+			if (rc) {
+				LERROR("failed to rename [%s] to [%s]: %s\n",
+				       subdir, newdir, strerror(errno));
+				rc = -errno;
+			}
+		} else if (end <= epoch->le_start) {
+			LDEBUG("[%s] is secondary\n", subdir);
+			if (active) {
+				snprintf(newdir, sizeof(newdir), "%s/%s",
+					 lcrp_status->ls_dir_secondary,
+					 dirent->d_name);
+				rc = rename(subdir, newdir);
+				if (rc) {
+					LERROR("failed to rename [%s] to [%s]: %s\n",
+					       subdir, newdir, strerror(errno));
+					rc = -errno;
+				}
+			}
+		} else {
+			if (active)
+				LDEBUG("[%s] is active\n", subdir);
+			else
+				LERROR("invalid active file name [%s] in secondary directory, ignoring\n",
+				       subdir);
+		}
+	}
+
+	closedir(dir);
+out:
+	return rc;
+}
+
+static int lcrp_degrade(struct lcrp_epoch *epoch)
+{
+	int rc;
+
+	rc = lcrp_degrade_directory(epoch, false);
+	if (rc) {
+		LERROR("failed to degrade active directory\n");
+		return rc;
+	}
+
+	rc = lcrp_degrade_directory(epoch, true);
+	if (rc) {
+		LERROR("failed to degrade secondary directory\n");
+		return rc;
+	}
+	return rc;
+}
+
 static int _lcrp_epoch_update(struct lcrp_epoch *epoch, int current_second)
 {
 	int rc;
 	int interval = epoch->le_seconds;
 
+	LASSERT(current_second > interval);
 	pthread_mutex_lock(&epoch->le_mutex);
 	epoch->le_start = current_second;
-	epoch->le_end = current_second + interval;
+	rc = lcrp_degrade(epoch);
+	if (rc) {
+		LERROR("failed to degrade to udpate epoch\n");
+		goto out;
+	}
 	snprintf(epoch->le_dir_active, sizeof(epoch->le_dir_active),
-		 "%s/%d-%d", lcrp_status->ls_dir_active,
-		 epoch->le_start, epoch->le_end);
+		 "%s/%d-%d", lcrp_status->ls_dir_active, epoch->le_start,
+		 epoch->le_start + interval);
 	rc = lcrp_find_or_mkdir(epoch->le_dir_active);
 	if (rc) {
 		LERROR("failed to find or create directory [%s]\n",
@@ -287,7 +409,8 @@ static int _lcrp_epoch_update(struct lcrp_epoch *epoch, int current_second)
 	}
 out:
 	pthread_mutex_unlock(&epoch->le_mutex);
-	LERROR("updated epoch to [%d-%d]", epoch->le_start, epoch->le_end);
+	LERROR("updated epoch to [%d-%d]\n", epoch->le_start,
+	       epoch->le_start + interval);
 	return rc;
 }
 

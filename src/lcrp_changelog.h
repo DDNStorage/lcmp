@@ -13,12 +13,17 @@
 struct lcrp_epoch {
 	/* Lock to protect when epoch changes */
 	pthread_mutex_t	le_mutex;
-	/* Epoch interval in seconds */
+	/* Epoch interval in seconds, should >= LCRP_MIN_EPOCH_INTERVAL */
 	int le_seconds;
-	/* Start epoch time, protected by ls_mutex */
+	/**
+	 * Start epoch time of active directory
+	 * Should be N * le_seconds, N = current_time / le_seconds * le_seconds
+	 *
+	 * The active time is (N * le_seconds, (N + 1) * le_seconds]
+	 * The secondary time is ((N - 1) * le_seconds, N * le_seconds]
+	 * The inactive time is (0, (N - 1) * le_seconds]
+	 */
 	int le_start;
-	/* End epoch time, protected by ls_mutex */
-	int le_end;
 	/* Directory of this epoch under active, protected by ls_mutex */
 	char le_dir_active[PATH_MAX + 1];
 };
