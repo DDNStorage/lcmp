@@ -87,7 +87,7 @@ int lcrp_find_or_mkdir(const char *path)
 		return 0;
 	} else if (rc) {
 		if (errno == ENOENT) {
-			rc = mkdir(path, 0644);
+			rc = mkdir(path, 0755);
 			if (rc) {
 				LERROR("failed to create %s: %s\n",
 					path, strerror(errno));
@@ -133,8 +133,8 @@ static int lcrp_find_or_create(const char *path)
 	return 0;
 }
 
-static int lcrp_find_or_create_fid(const char *dir_fid, char *buf,
-				   int buf_size, struct lu_fid *fid)
+int lcrp_find_or_create_fid(const char *dir_fid, char *buf, int buf_size,
+			    struct lu_fid *fid)
 {
 	int rc;
 	char parent_path[PATH_MAX + 1];
@@ -183,8 +183,6 @@ static int lcrp_find_or_link(const char *old_path, const char *new_path)
 					new_path, old_path, strerror(errno));
 				return -errno;
 			}
-			close(rc);
-			rc = 0;
 		} else {
 			LERROR("failed to stat %s: %s\n", new_path,
 				strerror(errno));
@@ -194,8 +192,8 @@ static int lcrp_find_or_link(const char *old_path, const char *new_path)
 	return 0;
 }
 
-static int lcrp_find_or_link_fid(const char *root, struct lu_fid *fid,
-				 const char *fid_path)
+int lcrp_find_or_link_fid(const char *root, struct lu_fid *fid,
+			  const char *fid_path)
 {
 	int rc;
 	char link_path[PATH_MAX + 1];

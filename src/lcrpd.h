@@ -23,6 +23,7 @@
 #define LCRP_NAME_ACTIVE "active"
 #define LCRP_NAME_FIDS "fids"
 #define LCRP_NAME_INACTIVE "inactive"
+#define LCRP_NAME_INACTIVE_ALL "all"
 #define LCRP_NAME_SECONDARY "secondary"
 
 struct lcrp_thread_info {
@@ -34,6 +35,11 @@ struct lcrp_thread_info {
 	bool			 lti_stopping;
 	/* Thread is stopped */
 	bool			 lti_stopped;
+};
+
+struct lcrp_inactive_thread_info {
+	/* General thread info */
+	struct lcrp_thread_info	liti_general;
 };
 
 struct lcrp_changelog_thread_info {
@@ -60,10 +66,14 @@ struct lcrp_status {
 	char ls_dir_secondary[PATH_MAX + 1];
 	/* Directory of inactive */
 	char ls_dir_inactive[PATH_MAX + 1];
+	/* Directory of all inactive FIDs, under inactive directory */
+	char ls_dir_inactive_all[PATH_MAX + 1];
 	/* Singal recieved so stopping */
 	bool ls_stopping;
 	/* Info of Changlog thread */
-	struct lcrp_changelog_thread_info ls_info;
+	struct lcrp_changelog_thread_info ls_changelog_info;
+	/* Info of inactive thread */
+	struct lcrp_inactive_thread_info ls_inactive_info;
 	/* Epoch that could change from to time */
 	struct lcrp_epoch ls_epoch;
 };

@@ -32,5 +32,8 @@ int lcrp_find_or_mkdir(const char *path);
 int lcrp_changelog_consume(const char *dir_fid, struct lcrp_epoch *epoch,
 			   const char *mdt_device, const char *changelog_user,
 			   bool *stopping);
-
+int lcrp_find_or_create_fid(const char *dir_fid, char *buf, int buf_size,
+			    struct lu_fid *fid);
+int lcrp_find_or_link_fid(const char *root, struct lu_fid *fid,
+			  const char *fid_path);
 #endif /* _LCRP_CHANGELOG_H_ */

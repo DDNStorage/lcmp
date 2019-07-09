@@ -13,6 +13,7 @@
 #include <sys/time.h>
 #include <sys/types.h>
 #include <dirent.h>
+#include <lustre/lustreapi.h>
 
 #include "debug.h"
 #include "lcrp_changelog.h"
@@ -190,6 +191,16 @@ static int lcrp_init_dir(void)
 			lcrp_status->ls_dir_inactive);
 		return rc;
 	}
+
+	snprintf(lcrp_status->ls_dir_inactive_all,
+		 sizeof(lcrp_status->ls_dir_inactive_all), "%s/%s",
+		 lcrp_status->ls_dir_inactive, LCRP_NAME_INACTIVE_ALL);
+	rc = lcrp_find_or_mkdir(lcrp_status->ls_dir_inactive_all);
+	if (rc) {
+		LERROR("failed to find or create directory [%s]\n",
+			lcrp_status->ls_dir_inactive_all);
+		return rc;
+	}
 	return 0;
 }
 
@@ -217,6 +228,281 @@ void *lcrp_changelog_thread(void *arg)
 	return NULL;
 }
 
+static int lcrp_inactive_cleanup_fid(char *fpath, struct lu_fid *fid)
+{
+	int rc;
+	char fid_path[PATH_MAX + 1];
+
+	rc = lcrp_find_or_create_fid(lcrp_status->ls_dir_fid,
+				     fid_path, sizeof(fid_path), fid);
+	if (rc) {
+		LERROR("failed to find path of FID "DFID"\n",
+			PFID(fid));
+		return rc;
+	}
+
+	rc = lcrp_find_or_link_fid(lcrp_status->ls_dir_inactive_all, fid,
+				   fid_path);
+	if (rc) {
+		LERROR("failed to find or link FID "DFID" to inactive directory\n",
+		       PFID(fid));
+		return rc;
+	}
+
+	rc = unlink(fpath);
+	if (rc) {
+		LERROR("failed to unlink [%s]: %s\n",
+		       fpath, strerror(errno));
+		rc = -errno;
+	}
+	return 0;
+}
+
+/*
+ * Cleanup directory $LCRPD_DIR/inactive/$START-$END/$(OID & 0xFFFF)
+ */
+static int lcrp_inactive_cleanup_hash(const char *root)
+{
+	int ret;
+	DIR *dir;
+	int rc = 0;
+	struct lu_fid fid;
+	bool do_unlink = true;
+	struct dirent *dirent;
+	char fpath[PATH_MAX + 1];
+
+	dir = opendir(root);
+	if (dir == NULL) {
+		LERROR("failed to open directory [%s]: %s\n",
+		       root, strerror(errno));
+		rc = -errno;
+		goto out;
+	}
+
+	while (true) {
+		errno = 0;
+		dirent = readdir(dir);
+		if (dirent == NULL) {
+			if (errno != 0) {
+				LERROR("failed to read directory [%s]: %s\n",
+				       root, strerror(errno));
+				rc = -errno;
+			}
+			break;
+		}
+
+		/* skip "." and ".." */
+		if (strcmp(dirent->d_name, ".") == 0 ||
+		    strcmp(dirent->d_name, "..") == 0)
+			continue;
+
+		snprintf(fpath, sizeof(fpath), "%s/%s", root,
+			 dirent->d_name);
+		/* In lcrp_get_fid_path(), file name is FID */
+		if (sscanf(dirent->d_name, SFID, RFID(&fid)) != 3) {
+			LWARN("invalid name pattern of file [%s], ignoring\n",
+			      fpath);
+			do_unlink = false;
+			continue;
+		}
+		rc = lcrp_inactive_cleanup_fid(fpath, &fid);
+		if (rc) {
+			LWARN("failed to cleanup fid [%s] in inactive dir\n",
+			      fpath);
+			break;
+		}
+	}
+
+	ret = closedir(dir);
+	if (ret) {
+		LERROR("failed to close dir [%s]: %s\n", root,
+		       strerror(errno));
+		if (rc == 0)
+			rc = -errno;
+		goto out;
+	}
+
+	if (rc == 0 && do_unlink) {
+		rc = rmdir(root);
+		if (rc) {
+			LERROR("failed to rmdir [%s]: %s\n",
+			       root, strerror(errno));
+			rc = -errno;
+		}
+	}
+
+out:
+	return rc;
+}
+
+/*
+ * Cleanup directory $LCRPD_DIR/inactive/$START-$END
+ */
+static int lcrp_inactive_cleanup_epoch(const char *root)
+{
+	int hash;
+	DIR *dir;
+	int ret;
+	int rc = 0;
+	struct dirent *dirent;
+	bool do_unlink = true;
+	char subdir[PATH_MAX + 1];
+
+	dir = opendir(root);
+	if (dir == NULL) {
+		LERROR("failed to open directory [%s]: %s\n",
+		       root, strerror(errno));
+		rc = -errno;
+		goto out;
+	}
+
+	while (true) {
+		errno = 0;
+		dirent = readdir(dir);
+		if (dirent == NULL) {
+			if (errno != 0) {
+				LERROR("failed to read directory [%s]: %s\n",
+				       root,
+				       strerror(errno));
+				rc = -errno;
+			}
+			break;
+		}
+
+		/* skip "." and ".." */
+		if (strcmp(dirent->d_name, ".") == 0 ||
+		    strcmp(dirent->d_name, "..") == 0)
+			continue;
+
+		snprintf(subdir, sizeof(subdir), "%s/%s", root,
+			 dirent->d_name);
+		/* In lcrp_get_fid_path(), parent directory is oid & 0xFFFF */
+		if (sscanf(dirent->d_name, "%x", &hash) != 1) {
+			LWARN("invalid name pattern of file [%s], ignoring\n",
+			      subdir);
+			do_unlink = false;
+			continue;
+		}
+		rc = lcrp_inactive_cleanup_hash(subdir);
+		if (rc) {
+			LERROR("failed to cleanup dir [%s] in inactive dir\n",
+			       subdir);
+			break;
+		}
+	}
+
+	ret = closedir(dir);
+	if (ret) {
+		LERROR("failed to close dir [%s]: %s\n", root,
+		       strerror(errno));
+		if (rc == 0)
+			rc = -errno;
+		goto out;
+	}
+
+	if (rc == 0 && do_unlink) {
+		rc = rmdir(root);
+		if (rc) {
+			LERROR("failed to rmdir [%s]: %s\n",
+			       root, strerror(errno));
+			rc = -errno;
+		}
+	}
+out:
+	return rc;
+}
+
+static int lcrp_inactive_cleanup(void)
+{
+	int ret;
+	int end;
+	DIR *dir;
+	int start;
+	int rc = 0;
+	const char *root;
+	struct dirent *dirent;
+	char subdir[PATH_MAX + 1];
+
+	root = lcrp_status->ls_dir_inactive;
+
+	dir = opendir(root);
+	if (dir == NULL) {
+		LERROR("failed to open directory [%s]: %s\n",
+		       root, strerror(errno));
+		rc = -errno;
+		goto out;
+	}
+
+	while (true) {
+		errno = 0;
+		dirent = readdir(dir);
+		if (dirent == NULL) {
+			if (errno != 0) {
+				LERROR("failed to read directory [%s]: %s\n",
+				       root,
+				       strerror(errno));
+				rc = -errno;
+			}
+			break;
+		}
+
+		/* skip "." and ".." */
+		if (strcmp(dirent->d_name, ".") == 0 ||
+		    strcmp(dirent->d_name, "..") == 0 ||
+		    strcmp(dirent->d_name, LCRP_NAME_INACTIVE_ALL) == 0)
+			continue;
+
+		snprintf(subdir, sizeof(subdir), "%s/%s", root,
+			 dirent->d_name);
+		if (sscanf(dirent->d_name, "%d-%d", &start, &end) != 2) {
+			LWARN("invalid name pattern of file [%s], ignoring\n",
+			      subdir);
+			continue;
+		}
+		if (start >= end) {
+			LWARN("invalid start/end of file [%s], ignoring\n",
+			      subdir);
+			continue;
+		}
+		rc = lcrp_inactive_cleanup_epoch(subdir);
+		if (rc) {
+			LERROR("failed to cleanup dir [%s] in inactive dir\n",
+			       subdir);
+			break;
+		}
+	}
+
+	ret = closedir(dir);
+	if (ret) {
+		LERROR("failed to close dir [%s]: %s\n", root,
+		       strerror(errno));
+		if (rc == 0)
+			rc = -errno;
+		goto out;
+	}
+
+out:
+	return rc;
+}
+
+void *lcrp_inactive_thread(void *arg)
+{
+	int rc;
+	struct lcrp_inactive_thread_info *info = arg;
+	struct lcrp_thread_info *general = &info->liti_general;
+
+	while ((!lcrp_status->ls_stopping) && !(general->lti_stopping)) {
+		sleep(1);
+		rc = lcrp_inactive_cleanup();
+		if (rc) {
+			LERROR("failed to cleanup inactive directory\n");
+			break;
+		}
+	}
+	general->lti_stopped = true;
+	return NULL;
+}
+
 static int lcrp_thread_stop(struct lcrp_thread_info *info)
 {
 	int rc;
@@ -234,7 +520,7 @@ static int lcrp_thread_stop(struct lcrp_thread_info *info)
 	return rc;
 }
 
-static int lcrp_thread_start(struct lcrp_thread_info *info,
+int lcrp_thread_start(struct lcrp_thread_info *info,
 			     void *(*start_routine)(void *),
 			     void *private_info)
 {
@@ -280,6 +566,7 @@ lcrp_signal_handler(int signum)
 
 static int lcrp_degrade_directory(struct lcrp_epoch *epoch, bool active)
 {
+	int ret;
 	int end;
 	DIR *dir;
 	int start;
@@ -315,22 +602,22 @@ static int lcrp_degrade_directory(struct lcrp_epoch *epoch, bool active)
 			break;
 		}
 
-		if (strlen(dirent->d_name) == 1 && dirent->d_name[0] == '.')
-			continue;
-		if (strlen(dirent->d_name) == 2 && dirent->d_name[1] == '.' &&
-		    dirent->d_name[1] == '.')
+		/* skip "." and ".." */
+		if (strcmp(dirent->d_name, ".") == 0 ||
+		    strcmp(dirent->d_name, "..") == 0 ||
+		    strcmp(dirent->d_name, LCRP_NAME_INACTIVE_ALL) == 0)
 			continue;
 
 		snprintf(subdir, sizeof(subdir), "%s/%s", root,
 			 dirent->d_name);
 		if (sscanf(dirent->d_name, "%d-%d", &start, &end) != 2) {
-			LERROR("invalid name pattern of file [%s], ignoring\n",
-			       subdir);
+			LWARN("invalid name pattern of file [%s], ignoring\n",
+			      subdir);
 			continue;
 		}
 		if (start >= end) {
-			LERROR("invalid start/end of file [%s], ignoring\n",
-			       subdir);
+			LWARN("invalid start/end of file [%s], ignoring\n",
+			      subdir);
 			continue;
 		}
 		if (end <= epoch->le_start - epoch->le_seconds) {
@@ -360,12 +647,20 @@ static int lcrp_degrade_directory(struct lcrp_epoch *epoch, bool active)
 			if (active)
 				LDEBUG("[%s] is active\n", subdir);
 			else
-				LERROR("invalid active file name [%s] in secondary directory, ignoring\n",
-				       subdir);
+				LWARN("invalid active file name [%s] in secondary directory, ignoring\n",
+				      subdir);
 		}
 	}
 
-	closedir(dir);
+	ret = closedir(dir);
+	if (ret) {
+		LERROR("failed to close dir [%s]: %s\n", root,
+		       strerror(errno));
+		if (rc == 0)
+			rc = -errno;
+		goto out;
+	}
+
 out:
 	return rc;
 }
@@ -412,8 +707,8 @@ static int _lcrp_epoch_update(struct lcrp_epoch *epoch, int current_second)
 	}
 out:
 	pthread_mutex_unlock(&epoch->le_mutex);
-	LERROR("updated epoch to [%d-%d]\n", epoch->le_start,
-	       epoch->le_start + interval);
+	LINFO("updated epoch to [%d-%d]\n", epoch->le_start,
+	      epoch->le_start + interval);
 	return rc;
 }
 
@@ -441,6 +736,7 @@ static int lcrp_epoch_update(void)
 int main(int argc, char *argv[])
 {
 	int rc;
+	int ret;
 	char *scalar;
 	FILE *config;
 	yaml_token_t token;
@@ -538,61 +834,92 @@ int main(int argc, char *argv[])
 	yaml_parser_delete(&parser);
 
 	if (rc)
-		goto out;
+		goto out_close;
 
 	rc = lcrp_init_dir();
 	if (rc) {
 		LERROR("failed to init access history directory\n");
-		goto out;
+		goto out_close;
 	}
 
 	if (lcrp_status->ls_mdt_device[0] == '\0') {
 		LERROR("[%s] is not configured in [%s]\n",
 		       LCRP_STR_MDT_DEVICE, config_fpath);
 		rc = -EINVAL;
-		goto out;
+		goto out_close;
 	}
 
 	if (lcrp_status->ls_changelog_user[0] == '\0') {
 		LERROR("[%s] is not configured in [%s]\n",
 		       LCRP_STR_CHANGELOG_USER, config_fpath);
 		rc = -EINVAL;
-		goto out;
+		goto out_close;
 	}
 
 	rc = lcrp_epoch_update();
 	if (rc) {
 		LERROR("failed to init epoch\n");
-		goto out;
+		goto out_close;
 	}
 
 	signal(SIGINT, lcrp_signal_handler);
 	signal(SIGHUP, lcrp_signal_handler);
 	signal(SIGTERM, lcrp_signal_handler);
 
-	rc = lcrp_thread_start(&lcrp_status->ls_info.lcti_general,
+	rc = lcrp_thread_start(&lcrp_status->ls_changelog_info.lcti_general,
 			       &lcrp_changelog_thread,
-			       &lcrp_status->ls_info);
+			       &lcrp_status->ls_changelog_info);
 	if (rc) {
 		LERROR("failed to start Changelog thread\n");
-		goto out;
+		goto out_fini;
+	}
+
+	rc = lcrp_thread_start(&lcrp_status->ls_inactive_info.liti_general,
+			       &lcrp_inactive_thread,
+			       &lcrp_status->ls_inactive_info);
+	if (rc) {
+		LERROR("failed to start inactive thread\n");
+		goto out_changelog;
 	}
 
 	while (!lcrp_status->ls_stopping) {
+		if (lcrp_status->ls_inactive_info.liti_general.lti_stopped) {
+			LERROR("thread for inactive files exited, aborting now\n");
+			break;
+		}
+
+		if (lcrp_status->ls_changelog_info.lcti_general.lti_stopped) {
+			LERROR("Changelog thread exited, aborting now\n");
+			break;
+		}
+		rc = lcrp_inactive_cleanup();
+		if (rc) {
+			LERROR("failed to cleanup inactive directory\n");
+			break;
+		}
 		sleep(1);
 		rc = lcrp_epoch_update();
 		if (rc) {
 			LERROR("failed to init epoch\n");
-			goto out;
+			goto out_inactive;
 		}
 	}
 
-	rc = lcrp_thread_stop(&lcrp_status->ls_info.lcti_general);
-	if (rc) {
-		LERROR("failed to stop Changelog thread\n");
-		goto out;
+out_inactive:
+	ret = lcrp_thread_stop(&lcrp_status->ls_inactive_info.liti_general);
+	if (ret) {
+		LERROR("failed to stop inactive thread\n");
+		if (rc == 0)
+			rc = ret;
 	}
-out:
+out_changelog:
+	ret = lcrp_thread_stop(&lcrp_status->ls_changelog_info.lcti_general);
+	if (ret) {
+		LERROR("failed to stop Changelog thread\n");
+		if (rc == 0)
+			rc = ret;
+	}
+out_fini:
 	lcrp_fini();
 out_close:
 	fclose(config);

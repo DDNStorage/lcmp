@@ -18,6 +18,7 @@
 
 enum {
 	ERROR	= 0,
+	WARN,
 	INFO,
 	DEBUG,
 };
@@ -26,6 +27,7 @@ extern int debug_level;
 extern FILE *debug_log;
 extern FILE *info_log;
 extern FILE *error_log;
+extern FILE *warn_log;
 
 /* Print debug information. This is controlled by the value of the
  * global variable 'debug'
@@ -68,6 +70,8 @@ static inline void _lcrp_logging(int level, bool watch, const char *fmt, ...)
 	_lcrp_logging(level, watch, "["#level"] [%s:%d] [%s()]: " format, \
 		      __FILE__,  __LINE__, __func__, ##args)
 
+#define LWARN(format, args...) \
+	lcrp_logging(WARN, false, format, ##args)
 
 #define LERROR(format, args...) \
 	lcrp_logging(ERROR, false, format, ##args)
